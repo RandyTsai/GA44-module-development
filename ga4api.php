@@ -23,12 +23,12 @@ class GAnalytics4{
 
     public $startDate;
     public $endDate;
-    public static $nodata;
+    public $filter;
 
-    private $property_id = GA4_PROPERTY_ID;  // set GA4 propertyID
-    private $credential_path = GA4_CREDENTIAL_PATH;
-    protected $client;
-    protected $sub_len = 15 ;  // substring length for dimension name
+    protected $property_id ;  // default set in config
+    protected $credential_path ;  // default set in config
+    protected $sub_len_table = 25 ;  // substring length for dimension name
+    protected $sub_len_chart = 15;
     protected $report = [
         'overview-recently' => [
             'label' => 'Overview',  // words to show and translate in page aside
@@ -38,7 +38,7 @@ class GAnalytics4{
             'sort' => 'date',
             'desc' => false,
             'realtime' => false,
-            'visible' => false,
+            'visible' => true,
             'allowed_filter' => true
         ],
         'currently-visit' => [
@@ -102,7 +102,7 @@ class GAnalytics4{
             'dimensions' => ['date'],
             'metrics' => ['totalUsers','newUsers'],
             'sort' => 'date',
-            'desc' => true,
+            'desc' => false,
             'realtime' => false,
             'visible' => true,
             'allowed_filter' => false
@@ -174,21 +174,39 @@ class GAnalytics4{
             'allowed_filter' => false
         ]
     ];
+    protected $additional_table_row = [];
+    protected $cur_dimensions;
+    protected $cur_metrics;
+    protected $sum_metric_figure = [];
+
+
+    private $client;
 
 
 
     /**
      * GAnalytics4 constructor.
      */
-    function __construct(){
+    function __construct($p_id =GA4_PROPERTY_ID , $c_path = GA4_CREDENTIAL_PATH){
+        $this->property_id = $p_id;
+        $this->credential_path = $c_path;
+
         putenv("GOOGLE_APPLICATION_CREDENTIALS=".$this->credential_path);  // set credential file
         $this->client = new BetaAnalyticsDataClient();
     }
 
-
     public function getAllReportAttributes(){
         return $this->report;
     }
+
+    public function setSubLenTable( $max_len_num ){
+        $this->sub_len_table = $max_len_num;
+    }
+    public function setSubLenChart( $max_len_num ){
+        $this->sub_len_chart = $max_len_num;
+    }
+
+
 
     /**
      * initial run the GA4 class by judging it's a single report or 4reports in overview page
@@ -197,45 +215,51 @@ class GAnalytics4{
      * @param $to, date
      * @return array
      */
-    public function run( $report_name, $from, $to, $filter ){
+    public function run( $report_name, $from, $to, $filter = null ){
 
+        $this->startDate = $from;
+        $this->endDate = $to;
+        $this->filter = $filter;
+        $this->cur_dimensions = $this->report[$report_name]['dimensions'];
+        $this->cur_metrics = $this->report[$report_name]['metrics'];
+
+        $current_report = $this->report[$report_name];
 
         if(isset($report_name) && ($report_name != '') && ($report_name != 'overview-recently')){
 
-            // fetch single report data
-            $result =  $this->getReport($report_name, $from, $to, $filter);
-            $current_report = $this->report[$report_name];
+            //  fetch  report data and implement cache mechanism
+            $result = $this->getReport($report_name, $from, $to, $filter);
 
             // output
             $table_html = $this->outputTable($current_report['dimensions'], $current_report['metrics'], $result);  // for table
             $data_array = $this->outputArray( $result);  // for visualization
+
             return[
              'html'=>$table_html,
              'array'=>$data_array
             ];
 
-
-
         }else{
 
-            // fetch multiple report data
-            $report =  $this->report;
-            $result =  $this->getReport('overview-recently', $from, $to, $filter);
-            $result_visit =  $this->getReport('currently-visit', $from, $to, $filter);
-            $result_country =  $this->getReport('country', $from, $to, $filter);
-            $result_page =  $this->getReport('top-visit-page', $from, $to, $filter);
+            //  fetch  report data and implement cache mechanism
+            $result_recv =  $this->getReport('overview-recently', $from, $to, $filter );
+            $result_visit =  $this->getReport('currently-visit', $from, $to, $filter );
+            $result_country =  $this->getReport('country', $from, $to, $filter );
+            $result_page =  $this->getReport('top-visit-page', $from, $to, $filter );
 
             // output
-            $result_array = $this->outputArray($result);
-            $result_visit_array = $this->outputArray($result_visit);
-            $result_country_table = $this->outputArray( $result_country);
-            $result_page_table  = $this->outputArray( $result_page);
+            $result_recv_arr = $this->outputArray($result_recv);
+            $result_recv_html = $this->outputTable($current_report['dimensions'], $current_report['metrics'], $result_recv);
+            $result_curv_arr = $this->outputArray($result_visit);
+            $result_country_arr = $this->outputArray( $result_country);
+            $result_page_arr  = $this->outputArray( $result_page);
 
             return[
-                'recently'=>$result_array,
-                'currently'=>$result_visit_array,
-                'country'=>$result_country_table,
-                'top-visit'=>$result_page_table
+                'recently_arr'=>$result_recv_arr,
+                'recently_html'=>$result_recv_html,
+                'currently'=>$result_curv_arr,
+                'country'=>$result_country_arr,
+                'top-visit'=>$result_page_arr
             ];
 
         }
@@ -244,74 +268,99 @@ class GAnalytics4{
 
 
 
-
-
     /**
      * get report data from google, the response data is a complex obj+arrays, not being well re-processed
+     * @param $report_name
+     * @param $from
+     * @param $to
+     * @param null $filter
+     * @return \Google\Analytics\Data\V1beta\RunRealtimeReportResponse|\Google\Analytics\Data\V1beta\RunReportResponse|mixed
+     * @throws \Google\ApiCore\ApiException
      */
     public function getReport($report_name, $from, $to, $filter = null){
 
 
-        $report_attrs = $this->report[$report_name];
-        $filter = trim($filter);
+        $unique_id = $report_name.'_'.hash('md5', $from.$to.$filter);  // an unique file name since a parameter changed
+        $cache_file = getcwd()."/cache/cache_".$unique_id.".txt";
+        if (!file_exists(getcwd()."/cache/")) { mkdir(getcwd()."/cache/", 0777, true); }  // check folder exist and create
+        $filemtime = filemtime($cache_file);  // get file last modified time
 
 
-        // new all dimension objs
-        $dimensions = [];
-        foreach( $report_attrs['dimensions'] as $d){
-            $dimensions[] = new Dimension(['name' => $d]);
-        }
+        if( file_exists($cache_file) && (time()-$filemtime <= 180)  ){
 
-        // new all metric objs
-        $metrics = [];
-        foreach( $report_attrs['metrics'] as $m){
-            $metrics[] = new Metric(['name' => $m]);
-        }
+            //read from cache
+            $tmp_data = file_get_contents($cache_file);
+            $response_data = unserialize($tmp_data);
 
-        $options = [
-            'property' => 'properties/' . $this->property_id,
-            'dateRanges' => [
-                new DateRange([
-                    'start_date' => $from,
-                    'end_date' => $to,
-                ]),
-            ],
-            'dimensions' => $dimensions,
-            'metrics' => $metrics,
-            'orderBys' => [
-                new OrderBy([
-                    'dimension' => new OrderBy\DimensionOrderBy([
-                        'dimension_name' => $report_attrs['sort'],
-                        'order_type' => in_array($report_attrs['sort'], ['hour']) ? OrderBy\DimensionOrderBy\OrderType::NUMERIC : OrderBy\DimensionOrderBy\OrderType::ALPHANUMERIC
-                    ]),
-                    'desc' => $report_attrs['desc'],
-                ]),
-            ],
-        ];
+            return $response_data;
 
-        // judge if a realtime report, then make an API call.
-        if($report_attrs['realtime']){
-            $response_data = $this->client->runRealtimeReport($options);
         }else{
-            // apply filter
-            if ($report_attrs['allowed_filter']) {
-                $options['dimensionFilter'] = new FilterExpression([
-                    'filter' => new Filter([
-                        'field_name' => 'pagePathPlusQueryString',
-                        'string_filter' => new Filter\StringFilter([
-                            'match_type' => Filter\StringFilter\MatchType::CONTAINS,
-                            'value' => $filter,
-                            'case_sensitive' => false
-                        ])
-                    ])
-                ]);
-            }
-            $response_data = $this->client->runReport($options);
-        }
 
-        return $response_data;
+            $report_attrs = $this->report[$report_name];
+            $filter = trim($filter);
+
+            // new all dimension objs
+            $dimensions = [];
+            foreach( $report_attrs['dimensions'] as $d){
+                $dimensions[] = new Dimension(['name' => $d]);
+            }
+
+            // new all metric objs
+            $metrics = [];
+            foreach( $report_attrs['metrics'] as $m){
+                $metrics[] = new Metric(['name' => $m]);
+            }
+
+            $options = [
+                'property' => 'properties/' . $this->property_id,
+                'dateRanges' => [
+                    new DateRange([
+                        'start_date' => $from,
+                        'end_date' => $to,
+                    ]),
+                ],
+                'dimensions' => $dimensions,
+                'metrics' => $metrics,
+                'orderBys' => [
+                    new OrderBy([
+                        'dimension' => new OrderBy\DimensionOrderBy([
+                            'dimension_name' => $report_attrs['sort'],
+                            'order_type' => in_array($report_attrs['sort'], ['hour']) ? OrderBy\DimensionOrderBy\OrderType::NUMERIC : OrderBy\DimensionOrderBy\OrderType::ALPHANUMERIC
+                        ]),
+                        'desc' => $report_attrs['desc'],
+                    ]),
+                ],
+            ];
+
+            // judge if a realtime report, then make an API call.
+            if($report_attrs['realtime']){
+                $response_data = $this->client->runRealtimeReport($options);
+            }else{
+                // apply filter
+                if ($report_attrs['allowed_filter']) {
+                    $options['dimensionFilter'] = new FilterExpression([
+                        'filter' => new Filter([
+                            'field_name' => 'pagePathPlusQueryString',
+                            'string_filter' => new Filter\StringFilter([
+                                'match_type' => Filter\StringFilter\MatchType::CONTAINS,
+                                'value' => $filter,
+                                'case_sensitive' => false
+                            ])
+                        ])
+                    ]);
+                }
+                $response_data = $this->client->runReport($options);
+            }
+
+            // write cache data
+            $tmp_data = serialize($response_data);
+            file_put_contents($cache_file, $tmp_data);
+
+            return $response_data;
+        }
 
     }
+
 
 
 
@@ -345,18 +394,44 @@ class GAnalytics4{
             $html .= '<tr>';
             foreach($row->getDimensionValues() as $dd){
 
-                // substring if the dimension name str too long
                 $str = $dd->getValue();
-                $str = (mb_strlen($str)> $this->sub_len)? mb_substr($str,0,$this->sub_len).'...' : $str;
 
-                $html .='<td>'.$str.'</td>';
+                // format the original yyyymmdd to yyyy-mm-dd
+                if(strtotime($str)){ $str = date('Y-m-d',strtotime($str)); }
+                // substring if the dimension name str too long
+                if( mb_strlen($str) > $this->sub_len_table){
+                    $str_cut = mb_substr($str,0,$this->sub_len_table).'...';
+                    $html .='<td>'.$str_cut.'<span class="hover">'.$str.'</span></td>';  // store complete and sub sentence
+                }else{
+                    $html .='<td>'.$str.'</td>';
+                }
+
             }
 
-            foreach($row->getMetricValues() as $mm){
-                $html .='<td>'.round($mm->getValue(),3).'</td>';
+            foreach($row->getMetricValues() as $k => $mm){
+
+                $val = round($mm->getValue(),3);
+                $html .='<td>'.$val.'</td>';
+
+                if(isset( $this->sum_metric_figure[$metrics[$k]] )){
+                    $this->sum_metric_figure[$metrics[$k]] += $val;
+                }else{
+                    $this->sum_metric_figure[$metrics[$k]] = $val;
+                }
+
             }
             $html .= '</tr>';
+
         }
+
+        // add additional row for metric number sum
+        $this->addSumData(['sessions', 'totalUsers','newUsers' ]);
+
+        // check if there are additional rows
+        if(count( $this->additional_table_row)>0){
+            foreach ($this->additional_table_row as $add_row) { $html .= $add_row;}
+        }
+
         $html .= '</tbody>';
         // values of a row - end
 
@@ -371,9 +446,12 @@ class GAnalytics4{
         $m_values = array(array());
         foreach ($report_data->getRows() as $row) {
             foreach($row->getDimensionValues() as $k => $dd){
-                // substring if the dimension name str too long
+
                 $str = $dd->getValue();
-                $str = (mb_strlen($str)> $this->sub_len)? mb_substr($str,0, $this->sub_len).'...' : $str;
+                // format the original yyyymmdd to yyyy-mm-dd
+                if(strtotime($str)){ $str = date('Y-m-d',strtotime($str)); }
+                // substring if the dimension name str too long
+                $str = (mb_strlen($str)> $this->sub_len_chart)? mb_substr($str,0, $this->sub_len_chart).'...' : $str;
 
                 $d_values[$k][] = $str;
             }
@@ -384,6 +462,41 @@ class GAnalytics4{
         }
 
         return ['dimensions' => $d_values, 'metrics'=> $m_values];
+
+    }
+
+
+    /**
+     * add row at the bottom of output table ***for the sum of metric***
+     * default called by outputTable()
+     * @param $metric_name , the metric name you want to sum up
+     * @param $title , the title of the row
+     */
+    public function addSumData($metric_name = []){
+
+        $name_appear =  array_intersect($metric_name, $this->cur_metrics);
+        $html = '';
+
+        if( !empty($name_appear) ){
+            $html .= '<tr>';
+            $html .= '<td class="total">Total : </td>';
+            for($i=0; $i< (count($this->cur_dimensions) -1); $i++){$html .= '<td> - </td>';}
+
+            foreach ( $this->cur_metrics as $cname){
+                $tmp = '<td> - </td>';
+                foreach ($name_appear as $gname){
+                    if( $gname == $cname ){
+                        $tmp = '<td>'.$this->sum_metric_figure[$cname].'</td>';  // replace
+                    }
+                }
+                $html .= $tmp;
+            }
+            $html .= '</tr>';
+        }
+
+        if($html!=='') $this->additional_table_row[] = $html;
+
+        return;
 
     }
 

@@ -5,33 +5,24 @@ include_once('ga4api.php');
 // start preparing GAnalytics data
 $ga = new GAnalytics4();
 
+$report_name = (isset($_GET['report']) && ($_GET['report']!='') && ($_GET['report']!='overview-recently'))? $_GET['report'] : 'overview-recently';
+$report_attr = $ga->getAllReportAttributes()[$report_name];
+$report_title = $report_attr['title'];
+
 $from = $_GET['startdate'] ? $_GET['startdate'] : date('Y-m-d', strtotime('-1 month'));
 $to = $_GET['enddate'] ? $_GET['enddate'] : date('Y-m-d');
-$response = $ga->run($_GET['report'], $from, $to, $_GET['u']);  // response of one report for each page, or multiple reports in 'overview' page
+$response = $ga->run($report_name, $from, $to, $_GET['u']);  // will get one report, or 4 reports in 'overview' page
 
-// for single report
-$response_html = '';
-$response_array = '';
-
-// for overview page
-$response_array_cur = '';
-$response_array_cun = '';
-$response_array_visit = '';
-if (isset($_GET['report']) && ($_GET['report']!='') && ($_GET['report']!='overview-recently')){
-	$report_name = $_GET['report'];
-	$report_title = $ga->getAllReportAttributes()[$report_name]['title'];
+if ( $report_name !='overview-recently'){
 	$response_html = $response['html'];
 	$response_array = $response['array'];
 }else{
-	$report_name = 'overview-recently';
-	$report_title = 'Recently visit';
-    $response_array = $response['recently'];
+    $response_array = $response['recently_arr'];
+    $response_html = $response['recently_html'];
     $response_array_cur = $response['currently'];
     $response_array_cun = $response['country'];
     $response_array_visit = $response['top-visit'];
 }
-
-
 
 
 ?>
@@ -54,7 +45,9 @@ if (isset($_GET['report']) && ($_GET['report']!='') && ($_GET['report']!='overvi
             	<?=$Lang->_('Range : ')?>
     			<?=$Lang->_('from')?> <input type="text" name="startdate" class="date-picker" value="<?=$from?>" />
     			<?=$Lang->_('to')?> <input type="text" name="enddate" class="date-picker" value="<?=$to?>" />&nbsp;
-				<?=$Lang->_('Page')?> : <input type="text" name="u" value="<?=$_GET['u']?>" placeholder="Ex: /page/1/" />
+				<?php if($report_attr['allowed_filter']){
+					echo $Lang->_('Page'). ' : <input type="text" name="u" value="'.$_GET['u'].'" placeholder="Ex: /page/1/" />';}
+				?>
 				<input type="hidden" name="report" value="<?=$_GET['report']?>" />
     			<button type="submit" href="#" class="button" id="view-button"><?=$Lang->_('View')?></button>
                 <button type="button" href="#" class="button" id="export-button"><?=$Lang->_('Export')?></button>
@@ -131,12 +124,14 @@ $(document).ready(function(){
 
 
     /** Generating Charts **/
-    var data_array = <?= json_encode($response_array) ?>;  // assign php array to js array
+    var data_array = <?= json_encode($response_array) ?>;  // assign fetched data array to js array
 	var dimensions = data_array['dimensions'];
 	var metrics = data_array['metrics'];
-	var report_name = "<?php echo $report_name; ?>"; // assign php variable to js array
+	var report_name = "<?php echo $report_name; ?>";  // assign fetched data variable to js array
+	var max_data_num = 10;
 
-	var remap = (value, x1, y1, x2, y2) => (value - x1) * (y2 - x2) / (y1 - x1) + x2;  // remap function
+    // remap function
+	var remap = (value, x1, y1, x2, y2) => (value - x1) * (y2 - x2) / (y1 - x1) + x2;
 
     var ctx = $('#myChart');
 	switch (report_name) {
@@ -233,11 +228,11 @@ $(document).ready(function(){
             new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: dimensions[0].slice(0, 10),
+                    labels: dimensions[0].slice(0, max_data_num),
                     datasets: [
                         {
                             label: 'Counts',
-                            data: metrics[0].slice(0, 10)
+                            data: metrics[0].slice(0, max_data_num)
                         }
                     ]
                 },
@@ -271,11 +266,11 @@ $(document).ready(function(){
             new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: dimensions[0].slice(0, 10),
+                    labels: dimensions[0].slice(0, max_data_num),
                     datasets: [
                         {
                             label: 'Counts',
-                            data: metrics[0].slice(0, 10)
+                            data: metrics[0].slice(0, max_data_num)
                         }
                     ]
                 },
@@ -343,7 +338,7 @@ $(document).ready(function(){
 
             new Chart(ctx, {
                 data: {
-                    labels: dimensions[0].slice(0, 10),
+                    labels: dimensions[0].slice(0, max_data_num),
                     datasets: [
                         {
                             type: 'bar',
@@ -525,11 +520,11 @@ $(document).ready(function(){
             new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: dimensions[0].slice(0, 10),
+                    labels: dimensions[0].slice(0, max_data_num),
                     datasets: [
                         {
                             label: 'Counts',
-                            data: metrics[0].slice(0, 10)
+                            data: metrics[0].slice(0, max_data_num)
                         }
                     ]
                 },
@@ -563,10 +558,10 @@ $(document).ready(function(){
 
 	}
 
-	//RWD
+
 	/** when click #export-button, output excel **/
     $('#filter #export-button').click(function(){
-        const date = new Date().toJSON().slice(0, 10);
+        const date = new Date().toLocaleDateString();
         $("#toExcel").table2excel({
             // exclude CSS class
             exclude:".noExl",
